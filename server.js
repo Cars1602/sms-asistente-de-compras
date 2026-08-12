@@ -724,10 +724,10 @@ app.get("/webhook", (req, res) => {
     res.sendStatus(403);
 });
 
-if (process.env.NETLIFY) {
-    const serverless = require("serverless-http");
-    module.exports.handler = serverless(app);
-} else {
+const serverless = require("serverless-http");
+module.exports.handler = serverless(app);
+
+if (!process.env.NETLIFY && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
     app.listen(PORT, async () => {
         console.log(`Servidor iniciado en el puerto ${PORT}`);
         console.log(`Panel de destinatarios: http://localhost:${PORT}/config`);
