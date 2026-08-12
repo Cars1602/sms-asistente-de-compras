@@ -17,6 +17,7 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "1224186667440867";
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const IS_SERVERLESS = Boolean(process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const CONFIG_PATH = IS_SERVERLESS ? path.join("/tmp", "config.json") : path.join(__dirname, "config.json");
+const TEMP_ROOT = IS_SERVERLESS ? path.join("/tmp", "upds_asistent") : path.join(__dirname, "temp");
 const batches = new Map();
 const outboundMessages = new Map();
 
@@ -214,23 +215,53 @@ function nombreSeguroArchivo(filename) {
 function esDocumentoPdf(documento) {
     const mimeType = String(documento?.mime_type || "").toLowerCase();
     const filename = String(documento?.filename || "").toLowerCase();
-    return mimeType === "application/pdf" || filename.endsWith(".pdf");
+    return mimeType === "application/pdf" || mimeType.includes("pdf") || filename.endsWith(".pdf");
+}
+
+function obtenerDocumentoPdfDesdeMensaje(mensaje) {
+    if (!mensaje) return null;
+    if (mensaje.type === "document" && mensaje.document?.id && esDocumentoPdf(mensaje.document)) {
+        return mensaje.document;
+    }
+    for (const key of ["document", "file", "media"]) {
+        const posible = mensaje[key];
+        if (posible?.id && esDocumentoPdf(posible)) {
+            return posible;
+        }
+    }
+    return null;
 }
 
 function obtenerBatch(numero) {
     if (!batches.has(numero)) {
-        const dir = path.join(__dirname, "temp", `lote_${numero}_${Date.now()}`);
+        const dir = path.join(TEMP_ROOT, `lote_${numero}`);
         fs.mkdirSync(dir, { recursive: true });
+        const files = fs.readdirSync(dir)
+            .filter(name => name.toLowerCase().endsWith(".pdf"))
+            .map(name => path.join(dir, name));
         batches.set(numero, {
             dir,
             outputPath: path.join(dir, `orden_compra_${numero}.pdf`),
-            files: [],
-            prompted: false,
+            files,
+            prompted: files.length > 0,
             processing: false,
             canceled: false
         });
     }
     return batches.get(numero);
+}
+
+function borrarBatch(numero) {
+    const batch = batches.get(numero);
+    const dir = batch?.dir || path.join(TEMP_ROOT, `lote_${numero}`);
+    batches.delete(numero);
+    try {
+        if (fs.existsSync(dir)) {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    } catch (error) {
+        console.error(`No se pudo borrar lote ${dir}:`, error.message);
+    }
 }
 
 function esConfirmacionFinal(texto) {
@@ -390,7 +421,7 @@ async function procesarLoteEnSegundoPlano(numero, batch) {
         await ejecutarJavascriptOrden(batch.dir, batch.outputPath);
 
         if (batch.canceled) {
-            batches.delete(numero);
+            borrarBatch(numero);
             return;
         }
 
@@ -404,7 +435,7 @@ async function procesarLoteEnSegundoPlano(numero, batch) {
         const mediaId = await subirMediaWhatsApp(batch.outputPath, "application/pdf");
 
         if (batch.canceled) {
-            batches.delete(numero);
+            borrarBatch(numero);
             return;
         }
 
@@ -433,10 +464,10 @@ async function procesarLoteEnSegundoPlano(numero, batch) {
         if (!enviados.length) {
             throw new Error("No se pudo enviar el PDF a ningun destinatario. Revisa en Render Logs el error exacto de Meta.");
         }
-        batches.delete(numero);
+        borrarBatch(numero);
     } catch (err) {
         if (batch.canceled) {
-            batches.delete(numero);
+            borrarBatch(numero);
             return;
         }
         batch.processing = false;
@@ -616,9 +647,10 @@ app.post("/webhook", async (req, res) => {
         const mensaje = value.messages[0];
         const numero = mensaje.from;
 
-        if (mensaje.type === "document" && mensaje.document && esDocumentoPdf(mensaje.document)) {
-            const documentId = mensaje.document.id;
-            const filename = nombreSeguroArchivo(mensaje.document.filename || "entrada.pdf");
+        const documentoPdf = obtenerDocumentoPdfDesdeMensaje(mensaje);
+        if (documentoPdf) {
+            const documentId = documentoPdf.id;
+            const filename = nombreSeguroArchivo(documentoPdf.filename || "entrada.pdf");
             const batch = obtenerBatch(numero);
             const uniqueFilename = `${String(batch.files.length + 1).padStart(3, "0")}_${filename}`;
             const inputPath = path.join(batch.dir, uniqueFilename);
@@ -649,6 +681,11 @@ app.post("/webhook", async (req, res) => {
             return res.sendStatus(200);
         }
 
+        if (["image", "video", "audio", "sticker"].includes(mensaje.type)) {
+            console.log(`Media ignorado de [${numero}] tipo=${mensaje.type}: ${JSON.stringify(mensaje[mensaje.type] || {})}`);
+            return res.sendStatus(200);
+        }
+
         const texto = mensaje.text?.body;
         if (texto) {
             console.log(`Mensaje recibido de [${numero}]: "${texto}"`);
@@ -675,7 +712,7 @@ app.post("/webhook", async (req, res) => {
                     return res.sendStatus(200);
                 }
                 batch.canceled = true;
-                batches.delete(numero);
+                borrarBatch(numero);
                 await enviarWhatsApp(numero, "Lote cancelado. Puedes volver a enviar todos los PDFs desde cero.");
                 return res.sendStatus(200);
             }
