@@ -396,11 +396,11 @@ async function responderIA(textoUsuario) {
 }
 
 function ejecutarJavascriptOrden(userTempDir, outputPath) {
-    const timeoutMs = Number(process.env.PROCESS_TIMEOUT_MS || 240000);
+    const timeoutMs = Number(process.env.PROCESS_TIMEOUT_MS || (IS_SERVERLESS ? 24000 : 240000));
     return Promise.race([
         generarOrdenDesdeCarpeta(userTempDir, outputPath, { tipoCambio: 6.97 }),
         new Promise((_, reject) => setTimeout(
-            () => reject(new Error(`El procesamiento supero ${Math.round(timeoutMs / 60000)} minuto(s). Se cancelo para no saturar Render.`)),
+            () => reject(new Error(`El procesamiento supero ${Math.round(timeoutMs / 1000)} segundo(s). En Netlify no conviene procesar PDFs pesados; revisa logs o usa Render para este flujo.`)),
             timeoutMs
         ))
     ]);
@@ -737,7 +737,11 @@ app.post("/webhook", async (req, res) => {
 
                 batch.processing = true;
                 await enviarWhatsApp(numero, `Perfecto. Inicie el procesamiento de ${batch.files.length} PDF(s). Lo enviare a: ${destinos.map(mostrarNumero).join(", ")}.`);
-                procesarLoteEnSegundoPlano(numero, batch);
+                if (IS_SERVERLESS) {
+                    await procesarLoteEnSegundoPlano(numero, batch);
+                } else {
+                    procesarLoteEnSegundoPlano(numero, batch);
+                }
                 return res.sendStatus(200);
             }
 
