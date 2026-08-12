@@ -15,7 +15,8 @@ const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || "").trim();
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "1224186667440867";
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const CONFIG_PATH = path.join(__dirname, "config.json");
+const IS_SERVERLESS = Boolean(process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const CONFIG_PATH = IS_SERVERLESS ? path.join("/tmp", "config.json") : path.join(__dirname, "config.json");
 const batches = new Map();
 const outboundMessages = new Map();
 
@@ -75,7 +76,13 @@ function cargarConfig() {
 }
 
 function guardarConfig(config) {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+    try {
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+        return true;
+    } catch (error) {
+        console.error(`No se pudo guardar config en ${CONFIG_PATH}:`, error.message);
+        return false;
+    }
 }
 
 function cargarRecipientsDesdeEnv() {
@@ -509,6 +516,7 @@ app.get("/config", (req, res) => {
 <main>
     <h1>Envio de ordenes por WhatsApp</h1>
     <p>Destinatarios actuales: <span class="active">${obtenerDestinatarios(config).map(mostrarNumero).join(", ") || "ninguno"}</span></p>
+    ${IS_SERVERLESS ? "<p><b>Netlify:</b> los cambios hechos aqui pueden ser temporales. Para dejar numeros fijos usa DEFAULT_RECIPIENTS y DEFAULT_ACTIVE_RECIPIENT en Environment variables.</p>" : ""}
     <div class="box">
         <form method="post" action="/config/recipients">
             <label>Nombre</label>

@@ -52,6 +52,8 @@ OPENAI_VENDOR_MODEL=gpt-4o-mini
 PROCESS_TIMEOUT_MS=240000
 ```
 
+En Netlify, los numeros agregados desde `/config` pueden ser temporales porque las funciones no tienen disco permanente. Para numeros fijos usa `DEFAULT_RECIPIENTS` y `DEFAULT_ACTIVE_RECIPIENT`.
+
 Webhook en Meta:
 
 ```text
