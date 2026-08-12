@@ -1,0 +1,29 @@
+[build]
+  command = "npm install"
+  publish = "public"
+  functions = "."
+
+[[redirects]]
+  from = "/webhook"
+  to = "/.netlify/functions/server/webhook"
+  status = 200
+
+[[redirects]]
+  from = "/config"
+  to = "/.netlify/functions/server/config"
+  status = 200
+
+[[redirects]]
+  from = "/status"
+  to = "/.netlify/functions/server/status"
+  status = 200
+
+[[redirects]]
+  from = "/test-send"
+  to = "/.netlify/functions/server/test-send"
+  status = 200
+
+[[redirects]]
+  from = "/"
+  to = "/.netlify/functions/server/config"
+  status = 200

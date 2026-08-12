@@ -1,0 +1,19 @@
+{
+  "name": "whatsapp-nit-webhook",
+  "version": "1.0.0",
+  "description": "Webhook para procesar PDFs de WhatsApp y generar ordenes de compra con JavaScript",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "openai": "^4.52.7",
+    "pdf-parse": "^1.1.1",
+    "pdfkit": "^0.15.0",
+    "serverless-http": "^3.2.0",
+    "dotenv": "^16.4.5",
+    "tunnelmole": "^2.1.15"
+  }
+}
