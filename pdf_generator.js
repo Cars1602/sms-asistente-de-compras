@@ -64,6 +64,18 @@ function checkbox(doc, x, y, checked) {
     if (checked) doc.font("Helvetica-Bold").fontSize(8).text("X", x + 1.8, y + 0.4, { width: 8, align: "center" });
 }
 
+function drawItemsHeader(doc, xs, col, y, blue) {
+    drawCell(doc, xs[0], y, col[0], 33, "CANTIDAD DE\nITEM", { fill: blue, bold: true, align: "center", size: 5.7 });
+    drawCell(doc, xs[1], y, col[1], 33, "DESCRIPCION", { fill: blue, bold: true, align: "center" });
+    drawCell(doc, xs[2], y, col[2], 33, "UNIDADES", { fill: blue, bold: true, align: "center" });
+    drawCell(doc, xs[3], y, col[3], 33, "CANTIDAD", { fill: blue, bold: true, align: "center" });
+    drawCell(doc, xs[4], y, col[4], 33, "PRECIO\nUNITARIO", { fill: blue, bold: true, align: "center" });
+    drawCell(doc, xs[5], y, col[5] + col[6], 16, "Importe", { fill: blue, bold: true, align: "center" });
+    drawCell(doc, xs[5], y + 16, col[5], 17, "$us.", { fill: blue, bold: true, align: "center" });
+    drawCell(doc, xs[6], y + 16, col[6], 17, "Bs.", { fill: blue, bold: true, align: "center" });
+    return y + 33;
+}
+
 function generarReportePdf(resultados, outputPath, tipoCambio = 6.97) {
     const conItems = resultados.filter(r => Array.isArray(r.items) && r.items.length && !r.error);
     const doc = new PDFDocument({ size: "LETTER", margin: 0 });
@@ -164,29 +176,28 @@ function generarReportePdf(resultados, outputPath, tipoCambio = 6.97) {
 
         const col = [46, 157, 46, 46, 48, 79, 82];
         const xs = col.reduce((acc, w) => [...acc, acc[acc.length - 1] + w], [startX]);
-        drawCell(doc, xs[0], y, col[0], 33, "CANTIDAD DE\nITEM", { fill: blue, bold: true, align: "center", size: 5.7 });
-        drawCell(doc, xs[1], y, col[1], 33, "DESCRIPCION", { fill: blue, bold: true, align: "center" });
-        drawCell(doc, xs[2], y, col[2], 33, "UNIDADES", { fill: blue, bold: true, align: "center" });
-        drawCell(doc, xs[3], y, col[3], 33, "CANTIDAD", { fill: blue, bold: true, align: "center" });
-        drawCell(doc, xs[4], y, col[4], 33, "PRECIO\nUNITARIO", { fill: blue, bold: true, align: "center" });
-        drawCell(doc, xs[5], y, col[5] + col[6], 16, "Importe", { fill: blue, bold: true, align: "center" });
-        drawCell(doc, xs[5], y + 16, col[5], 17, "$us.", { fill: blue, bold: true, align: "center" });
-        drawCell(doc, xs[6], y + 16, col[6], 17, "Bs.", { fill: blue, bold: true, align: "center" });
-        y += 33;
+        y = drawItemsHeader(doc, xs, col, y, blue);
 
         let totalBs = 0;
         let totalSus = 0;
         const numRows = Math.max(8, items.length);
         for (let i = 0; i < numRows; i++) {
             const it = items[i];
-            const h = it && it.desc.length > 82 ? 22 : it && it.desc.length > 48 ? 16 : 11;
+            const h = it && it.desc.length > 82 ? 18 : it && it.desc.length > 48 ? 13 : 9;
+            if (it && y + h + 160 > 760) {
+                doc.addPage();
+                y = 54;
+                drawCell(doc, startX, y, formW, 16, "ORDEN DE COMPRA - CONTINUACION DE ITEMS", { bold: true, align: "center" });
+                y += 16;
+                y = drawItemsHeader(doc, xs, col, y, blue);
+            }
             if (it) {
                 const totBs = Number(it.total || it.qty * it.price || 0);
                 const totSus = totBs / tipoCambio;
                 totalBs += totBs;
                 totalSus += totSus;
                 drawCell(doc, xs[0], y, col[0], h, i + 1, { align: "center" });
-                drawCell(doc, xs[1], y, col[1], h, it.desc, { size: 5.7, valignTop: true });
+                drawCell(doc, xs[1], y, col[1], h, it.desc, { size: items.length > 18 ? 5.2 : 5.7, valignTop: true });
                 drawCell(doc, xs[2], y, col[2], h, it.unit || "UN", { align: "center" });
                 drawCell(doc, xs[3], y, col[3], h, fmtQty(it.qty), { align: "center" });
                 drawCell(doc, xs[4], y, col[4], h, fmtMoney(it.price), { align: "right" });
@@ -199,6 +210,12 @@ function generarReportePdf(resultados, outputPath, tipoCambio = 6.97) {
         }
 
         const sumaCant = items.reduce((s, it) => s + Number(it.qty || 0), 0);
+        if (y + 155 > 760) {
+            doc.addPage();
+            y = 54;
+            drawCell(doc, startX, y, formW, 16, "ORDEN DE COMPRA - TOTALES Y FIRMAS", { bold: true, align: "center" });
+            y += 16;
+        }
         drawCell(doc, startX, y, col[0] + col[1] + col[2], 13, "SUB TOTALES", { bold: true });
         drawCell(doc, xs[3], y, col[3], 13, fmtQty(sumaCant), { bold: true, align: "center" });
         drawCell(doc, xs[4], y, col[4], 13, "");

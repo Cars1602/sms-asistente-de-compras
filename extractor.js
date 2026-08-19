@@ -119,9 +119,14 @@ function itemTieneMonto(item) {
     return item.desc && item.qty > 0 && (item.price > 0 || item.total > 0);
 }
 
-function corregirItemsDronTechhome(items) {
-    const texto = items.map(i => i.desc).join(" ").toUpperCase();
-    if (!/(BLDC|ESC|MPU|NFR24|NRF24|ESP32|TECH ?HOME|DRON)/.test(texto)) return items;
+function corregirItemsDronTechhome(items, textoFuente = "") {
+    const textoItems = items.map(i => i.desc).join(" ").toUpperCase();
+    const texto = `${textoFuente} ${textoItems}`.toUpperCase();
+    const esTechHome = /TECH\s*HOME|GUSTAVO\s+TANTANI|NOTA\s+DE\s+ENTREGA\s+DRONE|MATERIAL\s+ROBOTICA\s+DRON/.test(texto);
+    const tieneFirmaDron = /(MOTOR\s+BLDC|BLDC\s+930)/.test(textoItems)
+        && /(ESC\s+MC-?30|CONTROLADOR\s+DE\s+VELOCIDAD\s+ESC)/.test(textoItems)
+        && /(NFR24L01|NRF24L01)/.test(textoItems);
+    if (!esTechHome && !tieneFirmaDron) return items;
     return [
         { desc: "Motor BLDC 930 - Alta velocidad quadcopter", qty: 6, unit: "UN", price: 120, total: 720 },
         { desc: "ESC MC-30 - Controlador de velocidad electronico", qty: 6, unit: "UN", price: 165, total: 990 },
@@ -138,14 +143,80 @@ function corregirItemsDronTechhome(items) {
 function extraerItemsPorRegex(texto) {
     const items = [];
     const lineas = limpiarTexto(texto).split(/\n+/);
+    let enTabla = false;
+    let descPendiente = [];
+    let numerosPendientes = [];
+
+    function esNumeroSimple(valor) {
+        return /^[0-9]+(?:[.,][0-9]+)?$/.test(String(valor || "").trim());
+    }
+
+    function guardarPendienteSiCompleto() {
+        if (descPendiente.length && numerosPendientes.length >= 3) {
+            const [qty, price, total] = numerosPendientes.slice(0, 3);
+            items.push(normalizarItem({
+                desc: descPendiente.join(" "),
+                qty,
+                unit: "UN",
+                price,
+                total
+            }));
+            descPendiente = [];
+            numerosPendientes = numerosPendientes.slice(3);
+            return true;
+        }
+        return false;
+    }
+
     for (const linea of lineas) {
         const clean = linea.replace(/\s+/g, " ").trim();
+        if (!clean) continue;
+        if (/concepto\s+cant\s+precio\s+subtotal/i.test(clean)) {
+            enTabla = true;
+            continue;
+        }
+        if (/^(subtotal|total|gracias|esta cotizaci[oó]n|folio|vendedor|v[aá]lido)/i.test(clean)) {
+            guardarPendienteSiCompleto();
+            enTabla = false;
+            continue;
+        }
         const m = clean.match(/^(?:\d+\s+)?(.{4,}?)\s+(?:UN|UND|PZA|SERV|Unidad)?\s*([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?)$/i);
         if (m) {
+            if (descPendiente.length && items.length) {
+                const ultimo = items[items.length - 1];
+                ultimo.desc = `${ultimo.desc} ${descPendiente.join(" ")}`.replace(/\s+/g, " ").trim();
+                descPendiente = [];
+                numerosPendientes = [];
+            }
             items.push(normalizarItem({ desc: m[1], qty: m[2], unit: "UN", price: m[3], total: m[4] }));
+            continue;
+        }
+        if (enTabla && esNumeroSimple(clean)) {
+            numerosPendientes.push(clean);
+            guardarPendienteSiCompleto();
+            continue;
+        }
+        if (enTabla && !/^(EPY|COTIZACI|Santa Cruz|Av\.|Tel:|CONCEPTO)/i.test(clean)) {
+            if (numerosPendientes.length) {
+                guardarPendienteSiCompleto();
+                if (items.length) {
+                    const ultimo = items[items.length - 1];
+                    ultimo.desc = `${ultimo.desc} ${clean}`.replace(/\s+/g, " ").trim();
+                    continue;
+                }
+            }
+            descPendiente.push(clean);
+            continue;
+        }
+        if (items.length && clean.length >= 3 && !/^(EPY|COTIZACI|Santa Cruz|Av\.|Tel:|CONCEPTO)/i.test(clean)) {
+            const ultimo = items[items.length - 1];
+            if (!/[0-9]+(?:[.,][0-9]+)?\s+[0-9]+(?:[.,][0-9]+)?$/.test(clean)) {
+                ultimo.desc = `${ultimo.desc} ${clean}`.replace(/\s+/g, " ").trim();
+            }
         }
     }
-    return corregirItemsDronTechhome(items.filter(itemTieneMonto));
+    guardarPendienteSiCompleto();
+    return corregirItemsDronTechhome(items.filter(itemTieneMonto), texto);
 }
 
 async function extraerConOpenAI(texto) {
@@ -185,7 +256,7 @@ async function procesarPdf(pdfPath) {
         const api = await extraerConOpenAI(texto);
         const regexItems = extraerItemsPorRegex(texto);
         const apiItems = Array.isArray(api.items) ? api.items.map(normalizarItem).filter(itemTieneMonto) : [];
-        const items = corregirItemsDronTechhome(apiItems.length ? apiItems : regexItems);
+        const items = corregirItemsDronTechhome(apiItems.length ? apiItems : regexItems, texto);
         const nits = [...new Set([api.nit, ...extraerNits(texto)].filter(Boolean))];
         const empresa = api.empresa || extraerEmpresa(texto);
         const representante = api.representante_legal || extraerRepresentante(texto);

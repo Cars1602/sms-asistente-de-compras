@@ -245,7 +245,9 @@ function obtenerBatch(numero) {
             files,
             prompted: files.length > 0,
             processing: false,
-            canceled: false
+            canceled: false,
+            esperandoTipoCambio: false,
+            tipoCambio: null
         });
     }
     return batches.get(numero);
@@ -272,6 +274,14 @@ function esConfirmacionFinal(texto) {
 function esCancelacion(texto) {
     const clean = String(texto || "").trim().toLowerCase();
     return ["cancelar", "cancela", "cancelado", "anular", "borrar lote", "reiniciar"].includes(clean);
+}
+
+function extraerTipoCambio(texto) {
+    const clean = String(texto || "").trim().replace(",", ".");
+    const match = clean.match(/(?:^|\s)([0-9]{1,2}(?:\.[0-9]{1,4})?)(?:\s|$)/);
+    if (!match) return 0;
+    const valor = Number(match[1]);
+    return Number.isFinite(valor) && valor > 0 ? valor : 0;
 }
 
 async function descargarMediaWhatsApp(mediaId, outputPath) {
@@ -395,10 +405,10 @@ async function responderIA(textoUsuario) {
     }
 }
 
-function ejecutarJavascriptOrden(userTempDir, outputPath) {
+function ejecutarJavascriptOrden(userTempDir, outputPath, tipoCambio) {
     const timeoutMs = Number(process.env.PROCESS_TIMEOUT_MS || (IS_SERVERLESS ? 24000 : 240000));
     return Promise.race([
-        generarOrdenDesdeCarpeta(userTempDir, outputPath, { tipoCambio: 6.97 }),
+        generarOrdenDesdeCarpeta(userTempDir, outputPath, { tipoCambio }),
         new Promise((_, reject) => setTimeout(
             () => reject(new Error(`El procesamiento supero ${Math.round(timeoutMs / 1000)} segundo(s). En Netlify no conviene procesar PDFs pesados; revisa logs o usa Render para este flujo.`)),
             timeoutMs
@@ -417,8 +427,9 @@ async function procesarLoteEnSegundoPlano(numero, batch) {
     }
 
     try {
-        await enviarWhatsApp(numero, `Procesando ${batch.files.length} PDF(s) con JavaScript.`);
-        await ejecutarJavascriptOrden(batch.dir, batch.outputPath);
+        const tipoCambio = Number(batch.tipoCambio || process.env.DEFAULT_TIPO_CAMBIO || 6.97);
+        await enviarWhatsApp(numero, `Procesando ${batch.files.length} PDF(s) con JavaScript. Tipo de cambio: ${tipoCambio}.`);
+        await ejecutarJavascriptOrden(batch.dir, batch.outputPath, tipoCambio);
 
         if (batch.canceled) {
             borrarBatch(numero);
@@ -717,6 +728,35 @@ app.post("/webhook", async (req, res) => {
                 return res.sendStatus(200);
             }
 
+            const batchConTipoCambioPendiente = batches.get(numero);
+            if (batchConTipoCambioPendiente?.esperandoTipoCambio) {
+                const tipoCambio = extraerTipoCambio(texto);
+                if (!tipoCambio) {
+                    await enviarWhatsApp(numero, "No pude leer el tipo de cambio. Escríbelo como número, por ejemplo: 6.97");
+                    return res.sendStatus(200);
+                }
+                batchConTipoCambioPendiente.tipoCambio = tipoCambio;
+                batchConTipoCambioPendiente.esperandoTipoCambio = false;
+                if (batchConTipoCambioPendiente.processing) {
+                    await enviarWhatsApp(numero, "Ya estoy procesando ese lote. Te aviso cuando termine.");
+                    return res.sendStatus(200);
+                }
+                const config = cargarConfig();
+                const destinos = obtenerDestinatarios(config);
+                if (!destinos.length) {
+                    await enviarWhatsApp(numero, "Falta configurar destinatarios. Abre /config en el servidor, marca uno o varios numeros y vuelve a escribir SON TODOS.");
+                    return res.sendStatus(200);
+                }
+                batchConTipoCambioPendiente.processing = true;
+                await enviarWhatsApp(numero, `Perfecto. Usare tipo de cambio ${tipoCambio}. Inicie el procesamiento de ${batchConTipoCambioPendiente.files.length} PDF(s). Lo enviare a: ${destinos.map(mostrarNumero).join(", ")}.`);
+                if (IS_SERVERLESS) {
+                    await procesarLoteEnSegundoPlano(numero, batchConTipoCambioPendiente);
+                } else {
+                    procesarLoteEnSegundoPlano(numero, batchConTipoCambioPendiente);
+                }
+                return res.sendStatus(200);
+            }
+
             if (esConfirmacionFinal(texto)) {
                 const batch = batches.get(numero);
                 if (!batch || batch.files.length === 0) {
@@ -735,13 +775,8 @@ app.post("/webhook", async (req, res) => {
                     return res.sendStatus(200);
                 }
 
-                batch.processing = true;
-                await enviarWhatsApp(numero, `Perfecto. Inicie el procesamiento de ${batch.files.length} PDF(s). Lo enviare a: ${destinos.map(mostrarNumero).join(", ")}.`);
-                if (IS_SERVERLESS) {
-                    await procesarLoteEnSegundoPlano(numero, batch);
-                } else {
-                    procesarLoteEnSegundoPlano(numero, batch);
-                }
+                batch.esperandoTipoCambio = true;
+                await enviarWhatsApp(numero, `Antes de generar la orden, dime a cuanto esta el dolar hoy. Responde solo el numero, por ejemplo: 6.97. La orden se enviara a: ${destinos.map(mostrarNumero).join(", ")}.`);
                 return res.sendStatus(200);
             }
 
