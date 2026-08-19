@@ -2,6 +2,12 @@ const fs = require("fs");
 const path = require("path");
 const pdfParse = require("pdf-parse");
 const OpenAI = require("openai");
+let PDFParser = null;
+try {
+    PDFParser = require("pdf2json");
+} catch (_) {
+    PDFParser = null;
+}
 
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || "").trim();
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
@@ -171,7 +177,11 @@ function extraerItemsPorRegex(texto) {
     for (const linea of lineas) {
         const clean = linea.replace(/\s+/g, " ").trim();
         if (!clean) continue;
-        if (/concepto\s+cant\s+precio\s+subtotal/i.test(clean)) {
+        if (/concepto/i.test(clean) && /(cant|cantidad|precio|subtotal|total)/i.test(clean)) {
+            enTabla = true;
+            continue;
+        }
+        if (/^concepto$/i.test(clean)) {
             enTabla = true;
             continue;
         }
@@ -180,7 +190,7 @@ function extraerItemsPorRegex(texto) {
             enTabla = false;
             continue;
         }
-        const m = clean.match(/^(?:\d+\s+)?(.{4,}?)\s+(?:UN|UND|PZA|SERV|Unidad)?\s*([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?)$/i);
+        const m = clean.match(/^(?:\d+\s+)?(.{3,}?)\s+(?:UN|UND|PZA|SERV|Unidad|PZA\.?)?\s*([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?)$/i);
         if (m) {
             if (descPendiente.length && items.length) {
                 const ultimo = items[items.length - 1];
@@ -188,7 +198,11 @@ function extraerItemsPorRegex(texto) {
                 descPendiente = [];
                 numerosPendientes = [];
             }
-            items.push(normalizarItem({ desc: m[1], qty: m[2], unit: "UN", price: m[3], total: m[4] }));
+            const item = normalizarItem({ desc: m[1], qty: m[2], unit: "UN", price: m[3], total: m[4] });
+            if (!/^(folio|vendedor|valido|v.lido|tel|subtotal|total)$/i.test(item.desc)) {
+                items.push(item);
+                enTabla = true;
+            }
             continue;
         }
         if (enTabla && esNumeroSimple(clean)) {
@@ -216,7 +230,146 @@ function extraerItemsPorRegex(texto) {
         }
     }
     guardarPendienteSiCompleto();
+    if (!items.length) {
+        const bloque = extraerItemsDesdeBloqueConcepto(texto);
+        items.push(...bloque);
+    }
     return corregirItemsDronTechhome(items.filter(itemTieneMonto), texto);
+}
+
+function extraerItemsDesdeBloqueConcepto(texto) {
+    const limpio = limpiarTexto(texto);
+    const inicio = limpio.search(/CONCEPTO/i);
+    if (inicio < 0) return [];
+    const resto = limpio.slice(inicio);
+    const fin = resto.search(/\n\s*(Subtotal|TOTAL)\b/i);
+    const bloque = (fin >= 0 ? resto.slice(0, fin) : resto)
+        .split(/\n+/)
+        .map(l => l.replace(/\s+/g, " ").trim())
+        .filter(Boolean)
+        .filter(l => !/^(CONCEPTO|CANT|CANTIDAD|PRECIO|SUBTOTAL)$/i.test(l));
+
+    const encontrados = [];
+    for (const linea of bloque) {
+        const m = linea.match(/^(.+?)\s+([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?)\s+([0-9]+(?:[.,][0-9]+)?)$/);
+        if (m) {
+            encontrados.push(normalizarItem({ desc: m[1], qty: m[2], unit: "UN", price: m[3], total: m[4] }));
+            continue;
+        }
+        if (encontrados.length && !/^[0-9]+(?:[.,][0-9]+)?$/.test(linea)) {
+            const ultimo = encontrados[encontrados.length - 1];
+            ultimo.desc = `${ultimo.desc} ${linea}`.replace(/\s+/g, " ").trim();
+        }
+    }
+    return encontrados;
+}
+
+function decodePdfText(valor) {
+    try {
+        return decodeURIComponent(String(valor || ""));
+    } catch (_) {
+        return String(valor || "");
+    }
+}
+
+function normalizarClave(texto) {
+    return String(texto || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toUpperCase();
+}
+
+function agruparPorFila(texts) {
+    const filas = [];
+    for (const item of texts) {
+        const row = filas.find(f => Math.abs(f.y - item.y) < 0.35);
+        if (row) {
+            row.items.push(item);
+            row.y = (row.y + item.y) / 2;
+        } else {
+            filas.push({ y: item.y, items: [item] });
+        }
+    }
+    return filas
+        .sort((a, b) => a.y - b.y)
+        .map(f => ({
+            y: f.y,
+            items: f.items.sort((a, b) => a.x - b.x)
+        }));
+}
+
+function textoFila(fila) {
+    return fila.items.map(i => i.text).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function extraerNumeroColumna(items) {
+    const texto = items.map(i => i.text).join(" ").trim();
+    const match = texto.match(/[0-9]+(?:[.,][0-9]+)?/);
+    return match ? match[0] : "";
+}
+
+async function extraerItemsPorCoordenadas(pdfPath) {
+    if (!PDFParser) return [];
+    return new Promise(resolve => {
+        const parser = new PDFParser();
+        parser.on("pdfParser_dataError", err => {
+            console.error("pdf2json extractor fallo:", err?.parserError || err);
+            resolve([]);
+        });
+        parser.on("pdfParser_dataReady", data => {
+            try {
+                const items = [];
+                for (const page of data?.Pages || []) {
+                    const words = [];
+                    for (const text of page.Texts || []) {
+                        const value = (text.R || []).map(r => decodePdfText(r.T)).join("");
+                        if (value.trim()) words.push({ text: value.trim(), x: text.x, y: text.y });
+                    }
+                    const filas = agruparPorFila(words);
+                    const headerIndex = filas.findIndex(f => {
+                        const t = normalizarClave(textoFila(f));
+                        return t.includes("CONCEPTO") && t.includes("CANT") && t.includes("PRECIO") && t.includes("SUBTOTAL");
+                    });
+                    if (headerIndex < 0) continue;
+
+                    const header = filas[headerIndex].items;
+                    const buscarX = palabra => header.find(i => normalizarClave(i.text).includes(palabra))?.x;
+                    const cantX = buscarX("CANT") ?? 95;
+                    const precioX = buscarX("PRECIO") ?? 135;
+                    const subtotalX = buscarX("SUBTOTAL") ?? 180;
+                    let ultimo = null;
+
+                    for (const fila of filas.slice(headerIndex + 1)) {
+                        const t = textoFila(fila);
+                        const clave = normalizarClave(t);
+                        if (/^(SUBTOTAL|TOTAL)\b/.test(clave) || clave.includes("GRACIAS")) break;
+
+                        const descItems = fila.items.filter(i => i.x < cantX - 3);
+                        const cantItems = fila.items.filter(i => i.x >= cantX - 3 && i.x < precioX - 3);
+                        const precioItems = fila.items.filter(i => i.x >= precioX - 3 && i.x < subtotalX - 3);
+                        const subtotalItems = fila.items.filter(i => i.x >= subtotalX - 3);
+
+                        const desc = descItems.map(i => i.text).join(" ").replace(/\s+/g, " ").trim();
+                        const qty = extraerNumeroColumna(cantItems);
+                        const price = extraerNumeroColumna(precioItems);
+                        const total = extraerNumeroColumna(subtotalItems);
+
+                        if (desc && qty && price && total) {
+                            ultimo = normalizarItem({ desc, qty, unit: "UN", price, total });
+                            items.push(ultimo);
+                        } else if (desc && ultimo) {
+                            ultimo.desc = `${ultimo.desc} ${desc}`.replace(/\s+/g, " ").trim();
+                        }
+                    }
+                }
+                resolve(items.filter(itemTieneMonto));
+            } catch (error) {
+                console.error("Error leyendo tabla por coordenadas:", error.message);
+                resolve([]);
+            }
+        });
+        parser.loadPDF(pdfPath);
+    });
 }
 
 async function extraerConOpenAI(texto) {
@@ -254,9 +407,11 @@ async function procesarPdf(pdfPath) {
         const data = await pdfParse(fs.readFileSync(pdfPath));
         const texto = limpiarTexto(data.text || "");
         const api = await extraerConOpenAI(texto);
+        const coordItems = await extraerItemsPorCoordenadas(pdfPath);
         const regexItems = extraerItemsPorRegex(texto);
         const apiItems = Array.isArray(api.items) ? api.items.map(normalizarItem).filter(itemTieneMonto) : [];
-        const items = corregirItemsDronTechhome(apiItems.length ? apiItems : regexItems, texto);
+        const items = corregirItemsDronTechhome(coordItems.length ? coordItems : (apiItems.length ? apiItems : regexItems), texto);
+        console.log(`Items detectados en ${path.basename(pdfPath)}: coordenadas=${coordItems.length}, api=${apiItems.length}, texto=${regexItems.length}, usados=${items.length}`);
         const nits = [...new Set([api.nit, ...extraerNits(texto)].filter(Boolean))];
         const empresa = api.empresa || extraerEmpresa(texto);
         const representante = api.representante_legal || extraerRepresentante(texto);
