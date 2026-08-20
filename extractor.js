@@ -1,16 +1,22 @@
 const fs = require("fs");
 const path = require("path");
-const pdfParse = require("pdf-parse");
-const OpenAI = require("openai");
-let PDFParser = null;
+const { pathToFileURL } = require("url");
+let OpenAI = null;
 try {
-    PDFParser = require("pdf2json");
+    OpenAI = require("openai");
 } catch (_) {
-    PDFParser = null;
+    OpenAI = null;
 }
+let pdfParse = null;
+try {
+    pdfParse = require("pdf-parse");
+} catch (_) {
+    pdfParse = null;
+}
+let pdfjsPromise = null;
 
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || "").trim();
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+const openai = OPENAI_API_KEY && OpenAI ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
 function normalizarNumero(valor) {
     if (valor === null || valor === undefined) return 0;
@@ -264,14 +270,6 @@ function extraerItemsDesdeBloqueConcepto(texto) {
     return encontrados;
 }
 
-function decodePdfText(valor) {
-    try {
-        return decodeURIComponent(String(valor || ""));
-    } catch (_) {
-        return String(valor || "");
-    }
-}
-
 function normalizarClave(texto) {
     return String(texto || "")
         .normalize("NFD")
@@ -308,68 +306,99 @@ function extraerNumeroColumna(items) {
     return match ? match[0] : "";
 }
 
-async function extraerItemsPorCoordenadas(pdfPath) {
-    if (!PDFParser) return [];
-    return new Promise(resolve => {
-        const parser = new PDFParser();
-        parser.on("pdfParser_dataError", err => {
-            console.error("pdf2json extractor fallo:", err?.parserError || err);
-            resolve([]);
-        });
-        parser.on("pdfParser_dataReady", data => {
+async function cargarPdfjs() {
+    if (!pdfjsPromise) {
+        pdfjsPromise = (async () => {
             try {
-                const items = [];
-                for (const page of data?.Pages || []) {
-                    const words = [];
-                    for (const text of page.Texts || []) {
-                        const value = (text.R || []).map(r => decodePdfText(r.T)).join("");
-                        if (value.trim()) words.push({ text: value.trim(), x: text.x, y: text.y });
-                    }
-                    const filas = agruparPorFila(words);
-                    const headerIndex = filas.findIndex(f => {
-                        const t = normalizarClave(textoFila(f));
-                        return t.includes("CONCEPTO") && t.includes("CANT") && t.includes("PRECIO") && t.includes("SUBTOTAL");
-                    });
-                    if (headerIndex < 0) continue;
-
-                    const header = filas[headerIndex].items;
-                    const buscarX = palabra => header.find(i => normalizarClave(i.text).includes(palabra))?.x;
-                    const cantX = buscarX("CANT") ?? 95;
-                    const precioX = buscarX("PRECIO") ?? 135;
-                    const subtotalX = buscarX("SUBTOTAL") ?? 180;
-                    let ultimo = null;
-
-                    for (const fila of filas.slice(headerIndex + 1)) {
-                        const t = textoFila(fila);
-                        const clave = normalizarClave(t);
-                        if (/^(SUBTOTAL|TOTAL)\b/.test(clave) || clave.includes("GRACIAS")) break;
-
-                        const descItems = fila.items.filter(i => i.x < cantX - 3);
-                        const cantItems = fila.items.filter(i => i.x >= cantX - 3 && i.x < precioX - 3);
-                        const precioItems = fila.items.filter(i => i.x >= precioX - 3 && i.x < subtotalX - 3);
-                        const subtotalItems = fila.items.filter(i => i.x >= subtotalX - 3);
-
-                        const desc = descItems.map(i => i.text).join(" ").replace(/\s+/g, " ").trim();
-                        const qty = extraerNumeroColumna(cantItems);
-                        const price = extraerNumeroColumna(precioItems);
-                        const total = extraerNumeroColumna(subtotalItems);
-
-                        if (desc && qty && price && total) {
-                            ultimo = normalizarItem({ desc, qty, unit: "UN", price, total });
-                            items.push(ultimo);
-                        } else if (desc && ultimo) {
-                            ultimo.desc = `${ultimo.desc} ${desc}`.replace(/\s+/g, " ").trim();
-                        }
-                    }
+                return require("pdfjs-dist/legacy/build/pdf.js");
+            } catch (_) {
+                try {
+                    return await import("pdfjs-dist/build/pdf.mjs");
+                } catch (_) {
+                    const packagePath = require.resolve("pdfjs-dist/package.json");
+                    const packageDir = path.dirname(packagePath);
+                    return import(pathToFileURL(path.join(packageDir, "build", "pdf.mjs")).href);
                 }
-                resolve(items.filter(itemTieneMonto));
-            } catch (error) {
-                console.error("Error leyendo tabla por coordenadas:", error.message);
-                resolve([]);
             }
-        });
-        parser.loadPDF(pdfPath);
+        })();
+    }
+    return pdfjsPromise;
+}
+
+async function extraerPdfPorCoordenadas(pdfPath) {
+    const pdfjsLib = await cargarPdfjs();
+    const buffer = fs.readFileSync(pdfPath);
+    const loadingTask = pdfjsLib.getDocument({
+        data: new Uint8Array(buffer),
+        disableWorker: true,
+        useSystemFonts: true
     });
+    const pdf = await loadingTask.promise;
+    const items = [];
+    const textos = [];
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const content = await page.getTextContent({
+            normalizeWhitespace: true,
+            disableCombineTextItems: false
+        });
+        const words = [];
+        for (const item of content.items || []) {
+            const value = String(item.str || "").trim();
+            if (!value) continue;
+            const transform = item.transform || [1, 0, 0, 1, 0, 0];
+            words.push({
+                text: value,
+                x: transform[4],
+                y: transform[5]
+            });
+        }
+
+        const filas = agruparPorFila(words);
+        textos.push(...filas.map(textoFila));
+        const headerIndex = filas.findIndex(f => {
+            const t = normalizarClave(textoFila(f));
+            return t.includes("CONCEPTO") && t.includes("CANT") && t.includes("PRECIO") && t.includes("SUBTOTAL");
+        });
+        if (headerIndex < 0) continue;
+
+        const header = filas[headerIndex].items;
+        const buscarX = palabra => header.find(i => normalizarClave(i.text).includes(palabra))?.x;
+        const cantX = buscarX("CANT") ?? 260;
+        const precioX = buscarX("PRECIO") ?? 360;
+        const subtotalX = buscarX("SUBTOTAL") ?? 460;
+        let ultimo = null;
+
+        for (const fila of filas.slice(headerIndex + 1)) {
+            const t = textoFila(fila);
+            const clave = normalizarClave(t);
+            if (/^(SUBTOTAL|TOTAL)\b/.test(clave) || clave.includes("GRACIAS")) break;
+
+            const descItems = fila.items.filter(i => i.x < cantX - 8);
+            const cantItems = fila.items.filter(i => i.x >= cantX - 8 && i.x < precioX - 8);
+            const precioItems = fila.items.filter(i => i.x >= precioX - 8 && i.x < subtotalX - 8);
+            const subtotalItems = fila.items.filter(i => i.x >= subtotalX - 8);
+
+            const desc = descItems.map(i => i.text).join(" ").replace(/\s+/g, " ").trim();
+            const qty = extraerNumeroColumna(cantItems);
+            const price = extraerNumeroColumna(precioItems);
+            const total = extraerNumeroColumna(subtotalItems);
+
+            if (desc && qty && price && total) {
+                ultimo = normalizarItem({ desc, qty, unit: "UN", price, total });
+                items.push(ultimo);
+            } else if (desc && ultimo) {
+                ultimo.desc = `${ultimo.desc} ${desc}`.replace(/\s+/g, " ").trim();
+            }
+        }
+    }
+
+    return {
+        items: items.filter(itemTieneMonto),
+        texto: textos.join("\n"),
+        paginas: pdf.numPages || 0
+    };
 }
 
 async function extraerConOpenAI(texto) {
@@ -404,10 +433,26 @@ ${texto.slice(0, 14000)}`;
 
 async function procesarPdf(pdfPath) {
     try {
-        const data = await pdfParse(fs.readFileSync(pdfPath));
-        const texto = limpiarTexto(data.text || "");
+        const buffer = fs.readFileSync(pdfPath);
+        let data = { text: "", numpages: 0 };
+        if (pdfParse) {
+            try {
+                data = await pdfParse(buffer);
+            } catch (error) {
+                console.error(`pdf-parse fallo en ${path.basename(pdfPath)}; continuo con pdfjs-dist:`, error.message);
+            }
+        }
+
+        let coordData = { items: [], texto: "", paginas: 0 };
+        try {
+            coordData = await extraerPdfPorCoordenadas(pdfPath);
+        } catch (error) {
+            console.error("pdfjs-dist extractor fallo:", error.message);
+        }
+
+        const texto = limpiarTexto(data.text || coordData.texto || "");
         const api = await extraerConOpenAI(texto);
-        const coordItems = await extraerItemsPorCoordenadas(pdfPath);
+        const coordItems = coordData.items || [];
         const regexItems = extraerItemsPorRegex(texto);
         const apiItems = Array.isArray(api.items) ? api.items.map(normalizarItem).filter(itemTieneMonto) : [];
         const items = corregirItemsDronTechhome(coordItems.length ? coordItems : (apiItems.length ? apiItems : regexItems), texto);
@@ -416,7 +461,7 @@ async function procesarPdf(pdfPath) {
         const empresa = api.empresa || extraerEmpresa(texto);
         const representante = api.representante_legal || extraerRepresentante(texto);
         return {
-            ...resultadoVacio("", data.numpages || 0),
+            ...resultadoVacio("", data.numpages || coordData.paginas || 0),
             nits,
             razon_social: empresa,
             cuenta_bancaria: api.cuenta_bancaria || extraerCuenta(texto),
